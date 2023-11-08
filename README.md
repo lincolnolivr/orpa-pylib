@@ -1,2 +1,2 @@
 # orpa-pylib
-library for rpas in python
+library for easily creating rpas in python
