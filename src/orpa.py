@@ -1,34 +1,39 @@
-# COMMAND ---------- [markdown]
+# %%
+__version__ = '2.1.0'
+
+# %% [markdown]
 # # orpa (RPA Functions)
 
-# COMMAND ----------
+# %%
 import os
 import sys
 import time
-import signal
-import atexit
 import random
 import zipfile
 import requests
-import win32api
 import win32con
 import pyautogui
 import pyperclip
+import pygetwindow
 import http.client
 import pandas as pd
 import win32com.client
 from io import BytesIO
+import PySimpleGUI as sg
 from PIL import ImageGrab
 from threading import local
 import win32clipboard as clip
 from datetime import datetime
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from mouseinfo import mouseInfo
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import Select
-from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.edge.options import Options
+from selenium.webdriver.edge.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import NoSuchDriverException, NoSuchElementException
 from win32gui import GetWindowText, GetForegroundWindow
 
 import mylibs.osystempy as osystempy
@@ -43,7 +48,7 @@ def wait(mintime=3,maxtime=5):
     mintime = mintime * 60
     maxtime = maxtime * 60
     x = random.uniform(mintime,maxtime)
-    print('Iniciando próxima ação em ' + str(datetime.timedelta(seconds=x)) + ' min \n')
+    print('Starting next action in ' + str(datetime.timedelta(seconds=x)) + ' min \n')
     time.sleep(x)
 
 def get_screen_size():
@@ -122,8 +127,11 @@ def job(job_name='Job'):
         start_saving_logs()
         logs_df = pd.concat([logs_df, df], ignore_index=True)
 
-def save_logs(file_path=os.path.join(os.path.expanduser('~'), 'Downloads'), file_prefix='', mode=None):
+def save_logs(file_path: str=None, file_prefix='', mode=None):
     global logs_df
+
+    if file_path is None: file_path = get_downloads_folder()
+
     file_prefix = ' ' + file_prefix if file_prefix != '' else file_prefix
     logs_file_name = os.path.join(file_path, format(datetime.now())[:10].replace(' ', '-').replace(':', '-') + file_prefix + ' Logs' + '.txt')
     logs_df.to_csv(logs_file_name, mode='a', index=False,header=not(os.path.isfile(logs_file_name)))
@@ -135,14 +143,19 @@ def save_logs(file_path=os.path.join(os.path.expanduser('~'), 'Downloads'), file
 def get_active_window():
     return print(GetWindowText(GetForegroundWindow()))
 
+def activate_screen():
+    win = pygetwindow.getWindowsWithTitle('Oracle Applications')[0]
+    win.activate()
+    time.sleep(3)
+
 def power_automates_notify(notify_url,notify_path):
     conn = http.client.HTTPSConnection(notify_url)
     conn.request('POST', notify_path)
     response = conn.getresponse()
     if response.status == 202:
-        print('Requisição bem sucedida!')
+        print('Successful request!')
     else:
-        print(f'Erro na requisição. Código de status: {response.status}')
+        print(f'Request error. Status code: {response.status}')
 
     conn.close()
 
@@ -205,10 +218,40 @@ def send_email_notification(subject, body,to=None, importance='normal'):
         mail.Body = body
         mail.Send()
 
-# COMMAND ---------- [markdown]
+def get_user_credentials(screen_name: str='Login'):
+    sg.theme('Reddit')
+
+    layout = [
+        [sg.Text('User: ')],
+        [sg.Input(key='user', size=(30,1))],
+        [sg.Text('Password: ')], 
+        [sg.Input(key='pass', password_char='*', size=(30,1))],
+        [sg.Button('Submit')]
+    ]
+        
+    window = sg.Window(screen_name, layout, finalize=True)
+    window['pass'].bind("<Return>", "_Enter")
+
+    while True:
+        event, values = window.read()
+        if event == sg.WINDOW_CLOSED:
+            break
+        if event == 'Submit':
+            user = values['user']
+            password = values['pass']
+            window.close()
+            break
+        elif event == "pass" + "_Enter":
+            user = values['user']
+            password = values['pass']
+            window.close()
+            break
+    return user, password
+
+# %% [markdown]
 # Pyautogui
 
-# COMMAND ----------
+# %%
 def press(key):
     pyautogui.press(key)
 
@@ -237,7 +280,7 @@ def copy_clipboard():
     return pyperclip.paste()
 
 def pyautogui_open_microsoft_edge(link=''):
-    os.startfile('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe')
+    os.startfile(r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe')
     pyautogui.sleep(2)
     pyautogui.getActiveWindow().maximize()
 
@@ -293,59 +336,86 @@ def alternate_tabs(presses=1):
 
     pyautogui.keyUp('alt')
 
-# COMMAND ---------- [markdown]
+# %% [markdown]
 # Selenium
 
-# COMMAND ----------
+# %%
 def get_python_folder():
     return os.path.dirname(sys.executable)
 
-def get_edge_webdriver_folder():
-    python_folder = get_python_folder()
-    return os.path.join(python_folder,'msedgedriver.exe')
+def get_edge_webdriver_folder(wedriver_folder=None):
+    if wedriver_folder is None:
+        wedriver_folder = get_python_folder()
+    return os.path.join(wedriver_folder,'msedgedriver.exe')
 
-def download_edge_webdriver(version: str,python_folder: str,download_folder: str=None):
+def download_edge_webdriver(version: str, python_folder: str, download_folder: str=None):
     print('Downloading new Edge Webdriver')
     if download_folder is None: download_folder = os.path.join(os.path.expanduser('~'),'Downloads')
+    if not os.path.exists(download_folder): os.makedirs(download_folder)
+
+    download_file = os.path.join(download_folder,f'edgedriver_win64.zip')
+    url = 'https://msedgedriver.azureedge.net/' + version + '/edgedriver_win64.zip'
 
     try:
+        response = requests.get(url, allow_redirects=True, verify=False)
+    except NoSuchDriverException as e:
+        version = get_most_updated_webdriver_version()
         url = 'https://msedgedriver.azureedge.net/' + version + '/edgedriver_win64.zip'
-        response = requests.get(url, allow_redirects=True)
-        download_file = os.path.join(download_folder,f'edgedriver_win64.zip')
+        response = requests.get(url, allow_redirects=True, verify=False)
 
         # Check if the download was successful
-        if response.status_code == 200:
-            # Save the zip file
-            with open(download_file, 'wb') as f:
-                f.write(response.content)
+    if response.status_code == 200:
+        # Save the zip file
+        with open(download_file, 'wb') as f:
+            f.write(response.content)
 
-            with zipfile.ZipFile(download_file, 'r') as zip_ref:
-                zip_ref.extractall(python_folder)
-            os.remove(download_file)
-            print(f'WebDriver do Microsoft Edge (versão {version}) baixado com sucesso!')
-
-        else:
-            print('Falha ao baixar o arquivo ZIP do WebDriver.')
-    except Exception as e:
-        print(f"Erro ao baixar o WebDriver do Microsoft Edge: {e}")
-
-def is_edge_webdriver_update():
-    current_edge_version = osystempy.get_edge_version()
-    current_webdriver_version = osystempy.get_installed_edge_webdriver_version(get_edge_webdriver_folder())
-
-    if current_edge_version != current_webdriver_version:
-        print('Current Edge Version:', current_edge_version)
-        print('Current Webdriver Version', current_webdriver_version)
-        return False
+        with zipfile.ZipFile(download_file, 'r') as zip_ref:
+            zip_ref.extractall(python_folder)
+        os.remove(download_file)
+        print(f'Microsoft Edge WebDriver (version {version}) downloaded successfully!')
     else:
-        return True
+        print(f"Issue accessing the page {url}, please check network connection:", response.status_code)
 
-def update_edge_webdriver():
+def get_most_updated_webdriver_version():
+    url = "https://developer.microsoft.com/pt-br/microsoft-edge/tools/webdriver"
+    response = requests.get(url, allow_redirects=True, verify=False)
+    if response.status_code == 200:
+        # Analisa o conteúdo HTML da página
+        soup = BeautifulSoup(response.text, "html.parser")
+        # Encontra o link de download do WebDriver
+        webdriver_version = soup.find("div", {"class": "block-web-driver__versions"}).find_all(text=True)[1].strip()
+        return webdriver_version
+    else:
+        print(f"Issue accessing the page {url}, please check network connection:", response.status_code)
+        return None
+
+def is_edge_webdriver_update(wedriver_folder=None):
+    current_edge_version = osystempy.get_edge_version()
+    current_webdriver_version = osystempy.get_installed_edge_webdriver_version(get_edge_webdriver_folder(wedriver_folder))
+    newest_webdriver_version = get_most_updated_webdriver_version() 
+
+    if current_edge_version == current_webdriver_version:
+        return True
+    elif newest_webdriver_version == current_webdriver_version:
+        return True
+    else:
+        print('Current Edge Version:', current_edge_version)
+        print('Current Webdriver Version:', current_webdriver_version)
+        print('Newest Webdriver Version:', newest_webdriver_version)
+        return False
+    
+def update_edge_webdriver(executable_path: str=None, wedriver_folder: str=None):
+    if executable_path is None:
+        executable_path = os.path.join(os.path.expanduser('~'),'Downloads')
+
+    if wedriver_folder is None:
+        wedriver_folder = get_python_folder()
+
     print('Checking Webdriver Version...')
-    if is_edge_webdriver_update():
+    if is_edge_webdriver_update(wedriver_folder):
         print('Edge Webdriver is up to date!')
     else:
-        download_edge_webdriver(osystempy.get_edge_version(),get_python_folder())
+        download_edge_webdriver(osystempy.get_edge_version(),wedriver_folder, download_folder=executable_path)
 
 def selenium_hide_edge():
     global edge_options
@@ -356,15 +426,35 @@ def selenium_hide_edge():
     edge_options.add_argument("--start-maximized")
     edge_options.add_argument("--headless=new")
 
-def selenium_open_edge(link='https://www.google.com/',hidden=False):
+def set_specific_edge_webdriver(executable_path: str, start_options: bool=False):
     global driver
     global edge_options
+    global edge_service
+    
+    if start_options:
+        edge_options = Options()
+    edge_options.use_chromium = True  # Se estiver usando o Edge baseado no Chromium
+    edge_options.binary_location = r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    edge_service = Service(executable_path)
+
+def selenium_open_edge(link: str='https://www.google.com/', hidden: bool=False, executable_path: str=None):
+    global driver
+    global edge_options
+    global edge_service
 
     if hidden:
         selenium_hide_edge()
-        driver = webdriver.Edge(options=edge_options)
+        if executable_path is not None:
+            set_specific_edge_webdriver(executable_path, start_options=False)
+            driver = webdriver.Edge(options=edge_options, service=edge_service)
+        else:
+            driver = webdriver.Edge(options=edge_options)
     else:
-        driver = webdriver.Edge()
+        if executable_path is not None:
+            set_specific_edge_webdriver(executable_path, start_options=True)
+            driver = webdriver.Edge(options=edge_options, service=edge_service)
+        else:
+            driver = webdriver.Edge()
         driver.maximize_window()
     driver.get(link)
 
@@ -381,11 +471,11 @@ def selenium_wait_page_load(current_driver=None):
         else:
             sleep(1)
 
-def selenium_action(xpath, action='click', keys=None,tries=10, wait=1, current_driver=None):
+def selenium_action(xpath: str, action: str='click', keys: str=None, tries: int=10, wait: int=1, current_driver: webdriver.Edge=None):
     global driver
 
     if isinstance(xpath,webdriver.Edge):
-        print('Remova o orpa.driver da função ou atualize para current_driver=orpa.driver')
+        print('Remove orpa.driver from the function or update to current_driver=orpa.driver')
         return False
 
     if current_driver == None:
@@ -409,7 +499,7 @@ def selenium_action(xpath, action='click', keys=None,tries=10, wait=1, current_d
                 return False
             continue
 
-def selenium_click(xpath, tries=10, wait=1,current_driver=None):
+def selenium_click(xpath: str, tries: int=10, wait: int=1, current_driver: webdriver.Edge=None):
     global driver
 
     if current_driver == None:
@@ -428,7 +518,7 @@ def selenium_click(xpath, tries=10, wait=1,current_driver=None):
                 return False
             continue
 
-def selenium_get(url,current_driver=None):
+def selenium_get(url: str, current_driver: webdriver.Edge=None):
     global driver
 
     if current_driver == None:
@@ -444,7 +534,7 @@ def selenium_quit(current_driver=None):
 
     current_driver.quit()
 
-def selenium_write(xpath, keys=None,tries=10, wait=1, current_driver=None):
+def selenium_write(xpath: str, keys: str=None, tries: int=10, wait: int=1, current_driver: webdriver.Edge=None):
     global driver
 
     if current_driver == None:
@@ -463,7 +553,7 @@ def selenium_write(xpath, keys=None,tries=10, wait=1, current_driver=None):
                 return False
             continue
     
-def selenium_press_key(current_driver=None,keys=None,qty=1):
+def selenium_press_key(current_driver: webdriver.Edge=None, keys: str=None, qty: int=1):
     global driver
 
     if current_driver == None:
@@ -487,7 +577,7 @@ def selenium_press_key(current_driver=None,keys=None,qty=1):
         elif key == 'ctrl': actions.send_keys(Keys.CONTROL * qty)
         actions.perform()
 
-def selenium_clear_dropdown_list(current_driver, xpath, tries=10, wait=1):
+def selenium_clear_dropdown_list(current_driver: webdriver.Edge, xpath: str, tries: int=10, wait: int=1):
     global driver
 
     if current_driver == None:
@@ -506,7 +596,7 @@ def selenium_clear_dropdown_list(current_driver, xpath, tries=10, wait=1):
         print('Element not found')
         return False
     
-def selenium_select(xpath, value,current_driver=None):
+def selenium_select(xpath: str, value: str, current_driver: webdriver.Edge=None):
     global driver
 
     if current_driver == None:
@@ -515,10 +605,10 @@ def selenium_select(xpath, value,current_driver=None):
     button = Select(current_driver.find_element(By.XPATH, xpath))
     button.select_by_value(value)
 
-# COMMAND ---------- [markdown]
+# %% [markdown]
 # Credentials
 
-# COMMAND ----------
+# %%
 def set_credentials_file_sheet_name(sheet_name):
     global credentials_file_sheet_name
     credentials_file_sheet_name = sheet_name
@@ -620,7 +710,7 @@ def get_credentials(app_name, sheet_name=None, file_path=None):
 
     return login, password
 
-# COMMAND ----------
+# %%
 logs_folder = None
 ctrl_c_pressed = False
 credentials_file = None
